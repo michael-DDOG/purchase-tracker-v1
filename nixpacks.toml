@@ -1,2 +1,5 @@
 [phases.setup]
 aptPkgs = ["tesseract-ocr"]
+
+[phases.install]
+pythonVersion = "3.12"
