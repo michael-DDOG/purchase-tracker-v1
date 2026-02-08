@@ -21,6 +21,7 @@ CREATE TABLE vendors (
     email VARCHAR(255),
     contact_person VARCHAR(255),
     payment_terms VARCHAR(100), -- NET30, COD, etc.
+    default_due_days INTEGER DEFAULT 30, -- Days until payment due
     notes TEXT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -44,10 +45,15 @@ CREATE TABLE invoices (
     payment_reference VARCHAR(255),
     image_path TEXT, -- Path to stored invoice image
     ocr_raw_text TEXT, -- Raw OCR output for debugging
+    has_shortage BOOLEAN DEFAULT FALSE,
+    shortage_total DECIMAL(12,2) DEFAULT 0,
+    dispute_reason TEXT,
+    dispute_status VARCHAR(50), -- open, resolved, credited
+    credit_amount DECIMAL(12,2),
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- Composite unique constraint to prevent duplicates
     UNIQUE(vendor_id, invoice_number)
 );
@@ -59,10 +65,13 @@ CREATE TABLE invoice_items (
     product_name VARCHAR(500) NOT NULL,
     product_code VARCHAR(100), -- UPC, SKU, etc.
     quantity DECIMAL(10,3) NOT NULL,
+    received_quantity DECIMAL(10,3), -- Actually received (for shortage tracking)
     unit VARCHAR(50), -- case, each, lb, etc.
     unit_price DECIMAL(10,2) NOT NULL,
     total_price DECIMAL(12,2) NOT NULL,
     category_override INTEGER REFERENCES categories(id), -- If different from vendor category
+    is_disputed BOOLEAN DEFAULT FALSE,
+    dispute_reason TEXT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -79,9 +88,27 @@ CREATE TABLE products (
     avg_price DECIMAL(10,2),
     min_price DECIMAL(10,2),
     max_price DECIMAL(10,2),
+    sell_price DECIMAL(10,2), -- Retail shelf price
+    units_per_case INTEGER, -- How many units in a case
+    target_margin DECIMAL(5,2), -- Target profit margin %
     price_history JSONB, -- Array of {date, price, vendor_id}
+    reorder_frequency_days INTEGER, -- Avg days between orders
+    last_ordered_date DATE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Product vendor prices (one row per invoice line item for analytics)
+CREATE TABLE product_vendor_prices (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER REFERENCES products(id) NOT NULL,
+    vendor_id INTEGER REFERENCES vendors(id) NOT NULL,
+    invoice_item_id INTEGER REFERENCES invoice_items(id),
+    invoice_date DATE NOT NULL,
+    unit_price DECIMAL(10,2) NOT NULL,
+    quantity DECIMAL(10,3),
+    unit VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Daily sales figures (manual entry or ECRS import)
@@ -108,7 +135,7 @@ CREATE TABLE monthly_budgets (
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     UNIQUE(year_month, category_id)
 );
 
@@ -140,6 +167,75 @@ CREATE TABLE audit_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Competitor stores for regional price comparison
+CREATE TABLE competitor_stores (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    website_url TEXT,
+    scraper_type VARCHAR(50) DEFAULT 'manual',
+    scraper_config JSONB,
+    is_active BOOLEAN DEFAULT TRUE,
+    last_scraped_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Competitor prices
+CREATE TABLE competitor_prices (
+    id SERIAL PRIMARY KEY,
+    store_id INTEGER REFERENCES competitor_stores(id) NOT NULL,
+    product_name VARCHAR(500) NOT NULL,
+    normalized_name VARCHAR(500),
+    matched_product_id INTEGER REFERENCES products(id),
+    price DECIMAL(10,2) NOT NULL,
+    unit VARCHAR(50),
+    scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_current BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Recommendations (deal detection & smart insights)
+CREATE TABLE recommendations (
+    id SERIAL PRIMARY KEY,
+    type VARCHAR(50) NOT NULL,
+    product_id INTEGER REFERENCES products(id),
+    vendor_id INTEGER REFERENCES vendors(id),
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    potential_savings DECIMAL(10,2),
+    priority INTEGER DEFAULT 5,
+    is_dismissed BOOLEAN DEFAULT FALSE,
+    is_acted_on BOOLEAN DEFAULT FALSE,
+    data JSONB,
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- OCR correction mappings (learns from user corrections)
+CREATE TABLE ocr_corrections (
+    id SERIAL PRIMARY KEY,
+    original_text VARCHAR(500) NOT NULL,
+    corrected_text VARCHAR(500) NOT NULL,
+    field_type VARCHAR(50) DEFAULT 'product_name', -- product_name, vendor_name
+    use_count INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Price contracts (agreed prices with vendors)
+CREATE TABLE price_contracts (
+    id SERIAL PRIMARY KEY,
+    vendor_id INTEGER REFERENCES vendors(id) NOT NULL,
+    product_id INTEGER REFERENCES products(id) NOT NULL,
+    agreed_price DECIMAL(10,2) NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    notes TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Insert default categories
 INSERT INTO categories (name, description, target_budget_percent) VALUES
     ('Grocery/Dry Goods', 'Krasdale, shelf-stable items, bulk grocery', 35.00),
@@ -159,10 +255,15 @@ CREATE INDEX idx_invoice_items_invoice ON invoice_items(invoice_id);
 CREATE INDEX idx_products_normalized ON products(normalized_name);
 CREATE INDEX idx_daily_sales_date ON daily_sales(sale_date);
 CREATE INDEX idx_price_alerts_unack ON price_alerts(is_acknowledged) WHERE NOT is_acknowledged;
+CREATE INDEX idx_pvp_product_date ON product_vendor_prices(product_id, invoice_date);
+CREATE INDEX idx_pvp_vendor_product ON product_vendor_prices(vendor_id, product_id);
+CREATE INDEX idx_cp_store_product ON competitor_prices(store_id, normalized_name);
+CREATE INDEX idx_ocr_original ON ocr_corrections(original_text);
+CREATE INDEX idx_contract_vendor_product ON price_contracts(vendor_id, product_id);
 
 -- Create view for invoice summary with vendor info
 CREATE VIEW invoice_summary AS
-SELECT 
+SELECT
     i.id,
     i.invoice_number,
     i.invoice_date,
@@ -179,7 +280,7 @@ GROUP BY i.id, v.name, c.name;
 
 -- Create view for daily purchase totals by category
 CREATE VIEW daily_purchases_by_category AS
-SELECT 
+SELECT
     i.invoice_date,
     c.id as category_id,
     c.name as category_name,
@@ -192,7 +293,7 @@ GROUP BY i.invoice_date, c.id, c.name;
 
 -- Create view for monthly spending summary
 CREATE VIEW monthly_spending_summary AS
-SELECT 
+SELECT
     DATE_TRUNC('month', i.invoice_date) as month,
     c.id as category_id,
     c.name as category_name,

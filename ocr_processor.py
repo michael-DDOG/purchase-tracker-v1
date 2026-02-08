@@ -1,20 +1,16 @@
 """
 Apple Tree Purchase Tracker - Invoice OCR Processor
-Extracts structured data from invoice images
+Uses Claude Vision API (Anthropic SDK) for accurate invoice data extraction
 """
 
-import re
+import os
 import json
+import base64
 from datetime import datetime
-from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-# For production, we'd use:
-# - pytesseract for local OCR
-# - Google Cloud Vision API for better accuracy
-# - Azure Form Recognizer for structured extraction
 
 @dataclass
 class ExtractedLineItem:
@@ -26,6 +22,7 @@ class ExtractedLineItem:
     unit: Optional[str] = None
     product_code: Optional[str] = None
     confidence: float = 1.0
+
 
 @dataclass
 class ExtractedInvoice:
@@ -43,330 +40,217 @@ class ExtractedInvoice:
     line_items: List[ExtractedLineItem] = None
     raw_text: Optional[str] = None
     confidence_score: float = 0.0
-    
+
     def __post_init__(self):
         if self.line_items is None:
             self.line_items = []
-    
+
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
         result['line_items'] = [asdict(item) for item in self.line_items]
         return result
 
 
+VISION_PROMPT = """You are an expert invoice data extractor. Analyze this invoice image and extract all structured data.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "vendor_name": "string or null",
+  "vendor_address": "string or null",
+  "vendor_phone": "string or null",
+  "vendor_email": "string or null",
+  "invoice_number": "string or null",
+  "invoice_date": "MM-DD-YYYY or null",
+  "bill_to": "string or null",
+  "subtotal": number or null,
+  "tax": number or null,
+  "total": number or null,
+  "line_items": [
+    {
+      "line_number": 1,
+      "product_name": "string",
+      "quantity": number,
+      "unit_price": number,
+      "total_price": number,
+      "unit": "string or null",
+      "product_code": "string or null"
+    }
+  ]
+}
+
+Rules:
+- Extract EVERY line item visible on the invoice
+- For dates, use MM-DD-YYYY format
+- For prices, use numeric values (no $ signs)
+- If a field is not visible or unclear, use null
+- product_name should be the full product description as written
+- If quantity is not specified, assume 1.00
+- total_price = quantity * unit_price (verify this)
+- Return ONLY the JSON object, no markdown formatting"""
+
+
 class InvoiceOCRProcessor:
     """
-    Processes invoice images and extracts structured data.
-    Supports multiple OCR backends and invoice formats.
+    Processes invoice images using Claude Vision API for accurate extraction.
     """
-    
-    # Common patterns for invoice parsing
-    PATTERNS = {
-        'invoice_number': [
-            r'INV[#\-\s]*(\d+)',
-            r'Invoice\s*[#:\-]?\s*(\w+)',
-            r'Invoice\s*Number[:\s]+(\w+)',
-            r'#\s*(\d{4,})'
-        ],
-        'date': [
-            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
-            r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})',
-            r'Date[:\s]+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})'
-        ],
-        'total': [
-            r'Grand\s*Total[:\s]*\$?([\d,]+\.?\d*)',
-            r'Total[:\s]*\$?([\d,]+\.?\d*)',
-            r'Balance[:\s]*\$?([\d,]+\.?\d*)',
-            r'Amount\s*Due[:\s]*\$?([\d,]+\.?\d*)'
-        ],
-        'phone': [
-            r'(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})',
-            r'\((\d{3})\)\s*(\d{3})[-.\s]?(\d{4})'
-        ],
-        'email': [
-            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-        ]
-    }
-    
-    # Known vendor patterns for auto-detection
-    KNOWN_VENDORS = {
-        'sj wellness': {
-            'name': 'SJ Wellness',
-            'category': 'Deli/Specialty',
-            'patterns': ['sj wellness', 'sjwellness']
-        },
-        'krasdale': {
-            'name': 'Krasdale',
-            'category': 'Grocery/Dry Goods',
-            'patterns': ['krasdale', 'krasdale foods']
-        }
-        # Add more vendors as needed
-    }
-    
-    def __init__(self, ocr_backend: str = 'tesseract'):
-        self.ocr_backend = ocr_backend
-    
+
+    def __init__(self):
+        self.api_key = os.getenv("ANTHROPIC_API_KEY")
+
     def process_image(self, image_path: str) -> ExtractedInvoice:
         """
-        Main entry point - process an invoice image and return extracted data.
+        Process an invoice image file and return extracted data.
         """
-        # Get raw OCR text
-        raw_text = self._perform_ocr(image_path)
-        
-        # Parse the text into structured data
-        result = self._parse_invoice_text(raw_text)
-        result.raw_text = raw_text
-        
-        return result
-    
+        path = Path(image_path)
+        if not path.exists():
+            return ExtractedInvoice(confidence_score=0.0)
+
+        image_bytes = path.read_bytes()
+        return self._extract_with_claude(image_bytes, path.suffix.lower())
+
     def process_image_bytes(self, image_bytes: bytes, filename: str = '') -> ExtractedInvoice:
         """
         Process image from bytes (for API uploads).
         """
-        # Save temporarily and process
-        import tempfile
-        suffix = Path(filename).suffix if filename else '.jpg'
-        
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            f.write(image_bytes)
-            temp_path = f.name
-        
+        suffix = Path(filename).suffix.lower() if filename else '.jpg'
+        return self._extract_with_claude(image_bytes, suffix)
+
+    def _get_media_type(self, suffix: str) -> str:
+        media_types = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+        }
+        return media_types.get(suffix, 'image/jpeg')
+
+    def _extract_with_claude(self, image_bytes: bytes, suffix: str) -> ExtractedInvoice:
+        """
+        Send image to Claude Vision API and parse the response.
+        """
+        if not self.api_key:
+            print("Warning: ANTHROPIC_API_KEY not set, OCR disabled")
+            return ExtractedInvoice(confidence_score=0.0)
+
         try:
-            return self.process_image(temp_path)
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
-    
-    def _perform_ocr(self, image_path: str) -> str:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=self.api_key)
+            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+            media_type = self._get_media_type(suffix)
+
+            message = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=4096,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": VISION_PROMPT,
+                            },
+                        ],
+                    }
+                ],
+            )
+
+            response_text = message.content[0].text
+            return self._parse_claude_response(response_text)
+
+        except Exception as e:
+            print(f"Claude Vision error: {e}")
+            return ExtractedInvoice(confidence_score=0.3, raw_text=str(e))
+
+    def _parse_claude_response(self, response_text: str) -> ExtractedInvoice:
         """
-        Perform OCR on the image using configured backend.
-        """
-        if self.ocr_backend == 'tesseract':
-            return self._ocr_tesseract(image_path)
-        elif self.ocr_backend == 'google_vision':
-            return self._ocr_google_vision(image_path)
-        else:
-            raise ValueError(f"Unknown OCR backend: {self.ocr_backend}")
-    
-    def _ocr_tesseract(self, image_path: str) -> str:
-        """
-        Use Tesseract for OCR.
+        Parse Claude's JSON response into an ExtractedInvoice.
         """
         try:
-            import pytesseract
-            from PIL import Image
-            
-            image = Image.open(image_path)
-            text = pytesseract.image_to_string(image)
-            return text
-        except ImportError:
-            # Fallback for demo - return empty string
-            print("Warning: pytesseract not installed, OCR disabled")
-            return ""
-    
-    def _ocr_google_vision(self, image_path: str) -> str:
-        """
-        Use Google Cloud Vision API for OCR.
-        Better accuracy but requires API key.
-        """
-        try:
-            from google.cloud import vision
-            
-            client = vision.ImageAnnotatorClient()
-            
-            with open(image_path, 'rb') as f:
-                content = f.read()
-            
-            image = vision.Image(content=content)
-            response = client.text_detection(image=image)
-            
-            if response.text_annotations:
-                return response.text_annotations[0].description
-            return ""
-        except ImportError:
-            print("Warning: google-cloud-vision not installed")
-            return ""
-    
-    def _parse_invoice_text(self, text: str) -> ExtractedInvoice:
-        """
-        Parse raw OCR text into structured invoice data.
-        """
-        result = ExtractedInvoice()
-        
-        if not text:
-            return result
-        
-        lines = text.split('\n')
-        lines = [l.strip() for l in lines if l.strip()]
-        
-        # Extract vendor info (usually at the top)
-        result.vendor_name = self._extract_vendor_name(lines[:5])
-        result.vendor_address = self._extract_address(lines[:5])
-        result.vendor_phone = self._extract_pattern(text, 'phone')
-        result.vendor_email = self._extract_pattern(text, 'email')
-        
-        # Extract invoice metadata
-        result.invoice_number = self._extract_pattern(text, 'invoice_number')
-        result.invoice_date = self._extract_pattern(text, 'date')
-        result.total = self._extract_total(text)
-        
-        # Extract line items
-        result.line_items = self._extract_line_items(lines)
-        
-        # Calculate confidence score
-        result.confidence_score = self._calculate_confidence(result)
-        
-        return result
-    
-    def _extract_vendor_name(self, header_lines: List[str]) -> Optional[str]:
-        """
-        Extract vendor name from invoice header.
-        """
-        if not header_lines:
-            return None
-        
-        # First non-empty line is often vendor name
-        for line in header_lines:
-            # Skip if it's clearly not a name
-            if any(skip in line.lower() for skip in ['invoice', 'date', 'bill to', 'page']):
-                continue
-            
-            # Check against known vendors
-            line_lower = line.lower()
-            for vendor_key, vendor_info in self.KNOWN_VENDORS.items():
-                if any(p in line_lower for p in vendor_info['patterns']):
-                    return vendor_info['name']
-            
-            # Return first reasonable line
-            if len(line) > 2 and len(line) < 100:
-                return line
-        
-        return None
-    
-    def _extract_address(self, header_lines: List[str]) -> Optional[str]:
-        """
-        Extract address from header.
-        """
-        address_pattern = r'\d+\s+[\w\s]+(?:rd|st|ave|blvd|dr|ln|way|ct|pl)[\s,]+[\w\s]+\d{5}'
-        
-        full_text = ' '.join(header_lines)
-        match = re.search(address_pattern, full_text, re.IGNORECASE)
-        
-        if match:
-            return match.group(0)
-        return None
-    
-    def _extract_pattern(self, text: str, pattern_type: str) -> Optional[str]:
-        """
-        Extract using predefined patterns.
-        """
-        patterns = self.PATTERNS.get(pattern_type, [])
-        
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1) if match.groups() else match.group(0)
-        
-        return None
-    
-    def _extract_total(self, text: str) -> Optional[float]:
-        """
-        Extract invoice total.
-        """
-        total_str = self._extract_pattern(text, 'total')
-        if total_str:
-            try:
-                # Remove commas and convert
-                return float(total_str.replace(',', ''))
-            except ValueError:
-                pass
-        return None
-    
-    def _extract_line_items(self, lines: List[str]) -> List[ExtractedLineItem]:
-        """
-        Extract line items from invoice body.
-        """
-        items = []
-        
-        # Pattern for line items: number, product name, qty, rate, amount
-        # Example: "1    Susie apple    1.00    38.00    38.00"
-        line_item_pattern = r'^(\d+)\s+(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$'
-        
-        # Alternative pattern: product, qty, rate, amount
-        alt_pattern = r'^(.+?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*$'
-        
-        line_num = 0
-        for line in lines:
-            # Skip header rows
-            if any(h in line.lower() for h in ['product', 'qty', 'rate', 'amount', 'description', 'sr no']):
-                continue
-            
-            # Try main pattern
-            match = re.match(line_item_pattern, line)
-            if match:
-                line_num += 1
-                items.append(ExtractedLineItem(
-                    line_number=line_num,
-                    product_name=match.group(2).strip(),
-                    quantity=float(match.group(3)),
-                    unit_price=float(match.group(4)),
-                    total_price=float(match.group(5))
+            # Strip markdown code fences if present
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
+
+            data = json.loads(text)
+
+            line_items = []
+            for item in data.get("line_items", []):
+                line_items.append(ExtractedLineItem(
+                    line_number=item.get("line_number", len(line_items) + 1),
+                    product_name=item.get("product_name", "Unknown"),
+                    quantity=float(item.get("quantity", 1)),
+                    unit_price=float(item.get("unit_price", 0)),
+                    total_price=float(item.get("total_price", 0)),
+                    unit=item.get("unit"),
+                    product_code=item.get("product_code"),
                 ))
-                continue
-            
-            # Try alternative pattern
-            match = re.match(alt_pattern, line)
-            if match:
-                line_num += 1
-                items.append(ExtractedLineItem(
-                    line_number=line_num,
-                    product_name=match.group(1).strip(),
-                    quantity=float(match.group(2)),
-                    unit_price=float(match.group(3)),
-                    total_price=float(match.group(4))
-                ))
-        
-        return items
-    
+
+            invoice = ExtractedInvoice(
+                vendor_name=data.get("vendor_name"),
+                vendor_address=data.get("vendor_address"),
+                vendor_phone=data.get("vendor_phone"),
+                vendor_email=data.get("vendor_email"),
+                invoice_number=data.get("invoice_number"),
+                invoice_date=data.get("invoice_date"),
+                bill_to=data.get("bill_to"),
+                subtotal=float(data["subtotal"]) if data.get("subtotal") is not None else None,
+                tax=float(data["tax"]) if data.get("tax") is not None else None,
+                total=float(data["total"]) if data.get("total") is not None else None,
+                line_items=line_items,
+                raw_text=response_text,
+            )
+
+            # Calculate confidence
+            invoice.confidence_score = self._calculate_confidence(invoice)
+            return invoice
+
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            print(f"Failed to parse Claude response: {e}")
+            return ExtractedInvoice(
+                confidence_score=0.3,
+                raw_text=response_text,
+            )
+
     def _calculate_confidence(self, invoice: ExtractedInvoice) -> float:
         """
-        Calculate a confidence score for the extraction.
+        Calculate confidence score based on extraction completeness.
         """
-        score = 0.0
-        max_score = 0.0
-        
-        # Vendor name
-        max_score += 1
-        if invoice.vendor_name:
-            score += 1
-        
-        # Invoice number
-        max_score += 1
-        if invoice.invoice_number:
-            score += 1
-        
-        # Date
-        max_score += 1
-        if invoice.invoice_date:
-            score += 1
-        
-        # Total
-        max_score += 1
-        if invoice.total:
-            score += 1
-        
-        # Line items
-        max_score += 1
-        if invoice.line_items and len(invoice.line_items) > 0:
-            score += 1
-        
-        # Line items total matches invoice total
+        checks = [
+            invoice.vendor_name is not None,
+            invoice.invoice_number is not None,
+            invoice.invoice_date is not None,
+            invoice.total is not None,
+            len(invoice.line_items) > 0,
+        ]
+
+        base_score = sum(checks) / len(checks)
+
+        # Bonus: line items total matches invoice total
         if invoice.line_items and invoice.total:
             items_total = sum(item.total_price for item in invoice.line_items)
-            if abs(items_total - invoice.total) < 0.01:
-                score += 0.5
-                max_score += 0.5
-        
-        return score / max_score if max_score > 0 else 0.0
+            if abs(items_total - invoice.total) < 1.0:
+                base_score = min(1.0, base_score + 0.1)
+
+        # Map to confidence tiers: 0.95 for complete, 0.7 for partial
+        if base_score >= 0.8:
+            return 0.95
+        elif base_score >= 0.5:
+            return 0.7
+        else:
+            return 0.3
 
 
 def parse_sj_wellness_invoice_manual() -> ExtractedInvoice:
@@ -405,17 +289,15 @@ def parse_sj_wellness_invoice_manual() -> ExtractedInvoice:
             ExtractedLineItem(19, "Amphora Mango", 1.00, 26.00, 26.00),
             ExtractedLineItem(20, "Tates walnut", 1.00, 21.00, 21.00),
             ExtractedLineItem(21, "Tates oatmeal", 1.00, 52.00, 52.00),
-            ExtractedLineItem(22, "(unlabeled)", 1.00, 52.00, 52.00),  # From "Please Note" row
+            ExtractedLineItem(22, "(unlabeled)", 1.00, 52.00, 52.00),
         ],
         confidence_score=0.95
     )
 
 
-# Demo/test
 if __name__ == "__main__":
-    # Test with manual parsing
     invoice = parse_sj_wellness_invoice_manual()
-    
+
     print("Extracted Invoice:")
     print(f"  Vendor: {invoice.vendor_name}")
     print(f"  Address: {invoice.vendor_address}")
@@ -428,8 +310,7 @@ if __name__ == "__main__":
     print("Line Items:")
     for item in invoice.line_items:
         print(f"  {item.line_number}. {item.product_name}: {item.quantity} x ${item.unit_price} = ${item.total_price}")
-    
-    # Verify total
+
     items_total = sum(item.total_price for item in invoice.line_items)
     print(f"\nItems Total: ${items_total}")
     print(f"Invoice Total: ${invoice.total}")

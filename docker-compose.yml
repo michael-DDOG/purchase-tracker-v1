@@ -2,14 +2,16 @@
 version: '3.8'
 
 services:
-  # Backend API
-  backend:
-    build: ./backend
+  # Backend API + Frontend (served by FastAPI)
+  app:
+    build: .
     ports:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://tracker:tracker123@db:5432/purchase_tracker
       - PYTHONUNBUFFERED=1
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - APP_PIN=${APP_PIN:-1234}
     volumes:
       - ./uploads:/app/uploads
     depends_on:
@@ -29,17 +31,6 @@ services:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
     ports:
       - "5432:5432"
-    restart: unless-stopped
-
-  # Frontend (for development, use nginx in production)
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000/api
-    depends_on:
-      - backend
     restart: unless-stopped
 
 volumes:

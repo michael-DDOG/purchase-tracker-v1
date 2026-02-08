@@ -1,5 +1,5 @@
 [phases.setup]
-aptPkgs = ["tesseract-ocr"]
+nixPkgs = ["python312"]
 
 [phases.install]
 pythonVersion = "3.12"

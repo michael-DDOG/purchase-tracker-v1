@@ -1,0 +1,11 @@
+{
+  "name": "Apple Tree Purchase Tracker",
+  "short_name": "Apple Tree",
+  "description": "Track vendor invoices, manage purchasing budgets, and analyze spending",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "orientation": "portrait",
+  "icons": []
+}
