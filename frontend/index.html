@@ -16,25 +16,11 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-  <!-- Lucide React icons (MUST load before Babel to avoid module/exports pollution) -->
-  <script>
-    // Ensure UMD builds find React via lowercase globals
-    window.react = window.React;
-    window.reactDom = window.ReactDOM;
-    // Clear any module/exports that could trick UMD into CommonJS path
-    if (window.exports) { window._savedExports = window.exports; delete window.exports; }
-    if (window.module) { window._savedModule = window.module; delete window.module; }
-  </script>
-  <script crossorigin src="https://unpkg.com/lucide-react@0.469.0/dist/umd/lucide-react.min.js"></script>
-  <script>
-    // Normalize the global name (UMD exports as LucideReact)
-    window.lucideReact = window.lucideReact || window.LucideReact;
-    // Restore module/exports if they existed
-    if (window._savedExports) { window.exports = window._savedExports; }
-    if (window._savedModule) { window.module = window._savedModule; }
-  </script>
+  <!-- Lucide React icons (local patched copy - no CDN issues) -->
+  <script src="/static/lucide-react.min.js"></script>
+  <script>window.lucideReact = window.lucideReact || window.LucideReact;</script>
 
-  <!-- Babel standalone for JSX transpilation (loaded AFTER other UMD libs) -->
+  <!-- Babel standalone for JSX transpilation -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
