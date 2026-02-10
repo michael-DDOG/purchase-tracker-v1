@@ -16,9 +16,36 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-  <!-- Lucide React icons (local patched copy - no CDN issues) -->
-  <script src="/static/lucide-react.min.js"></script>
-  <script>window.lucideReact = window.lucideReact || window.LucideReact;</script>
+  <!-- Simple text icons replacing lucide-react -->
+  <script>
+    (function() {
+      var icons = {
+        Camera: '\u{1F4F7}', Upload: '\u2191', DollarSign: '$', TrendingUp: '\u2197',
+        Package: '\u{1F4E6}', AlertTriangle: '\u26A0', CheckCircle: '\u2713', Clock: '\u{1F555}',
+        X: '\u2715', Plus: '+', Search: '\u{1F50D}', Filter: '\u2261',
+        ChevronRight: '\u203A', RefreshCw: '\u21BB', LogOut: '\u2192', BarChart3: '\u{1F4CA}',
+        ShoppingCart: '\u{1F6D2}', Home: '\u{1F3E0}', Users: '\u{1F465}', Lightbulb: '\u{1F4A1}',
+        ExternalLink: '\u2197', ChevronDown: '\u2304', ArrowUpRight: '\u2197', ArrowDownRight: '\u2198',
+        Moon: '\u{1F319}', Sun: '\u2600', Download: '\u2193', FileText: '\u{1F4C4}',
+        AlertCircle: '\u26A0', Truck: '\u{1F69A}', Eye: '\u{1F441}', Star: '\u2B50',
+        RotateCcw: '\u21BA', Archive: '\u{1F4E6}', Percent: '%', Shield: '\u{1F6E1}',
+        Calendar: '\u{1F4C5}', Trash2: '\u{1F5D1}'
+      };
+      var lucideReact = {};
+      Object.keys(icons).forEach(function(name) {
+        lucideReact[name] = function(props) {
+          props = props || {};
+          var size = props.size || 24;
+          return React.createElement('span', {
+            style: { fontSize: (size * 0.65) + 'px', lineHeight: size + 'px', display: 'inline-block', width: size + 'px', height: size + 'px', textAlign: 'center', verticalAlign: 'middle' },
+            className: props.className || '',
+            role: 'img'
+          }, icons[name]);
+        };
+      });
+      window.lucideReact = lucideReact;
+    })();
+  </script>
 
   <!-- Babel standalone for JSX transpilation -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -33,7 +60,6 @@
       -webkit-font-smoothing: antialiased;
       overscroll-behavior: none;
     }
-    /* Prevent flash of unstyled content */
     #root:empty {
       display: flex;
       align-items: center;
@@ -56,7 +82,6 @@
 <body>
   <div id="root"></div>
 
-  <!-- Load and transpile App.jsx -->
   <script type="text/babel" data-type="module" src="/static/App.jsx"></script>
   <script type="text/babel">
     const root = ReactDOM.createRoot(document.getElementById('root'));
