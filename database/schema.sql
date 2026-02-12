@@ -236,6 +236,46 @@ CREATE TABLE price_contracts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Vendors: add deli vendor flag
+ALTER TABLE vendors ADD COLUMN IF NOT EXISTS is_deli_vendor BOOLEAN DEFAULT FALSE;
+
+-- Deli inventory tracking
+CREATE TABLE deli_inventory (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER REFERENCES products(id),
+    product_name VARCHAR(500) NOT NULL,
+    current_quantity DECIMAL(10,2) DEFAULT 0,
+    par_level DECIMAL(10,2) DEFAULT 0,
+    unit VARCHAR(50) DEFAULT 'ea',
+    last_counted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Vendor delivery schedules
+CREATE TABLE vendor_delivery_schedules (
+    id SERIAL PRIMARY KEY,
+    vendor_id INTEGER REFERENCES vendors(id) NOT NULL,
+    delivery_days VARCHAR(100), -- "mon,wed,fri"
+    cutoff_time VARCHAR(10),   -- "14:00"
+    lead_days INTEGER DEFAULT 1,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Deli order sheets
+CREATE TABLE deli_order_sheets (
+    id SERIAL PRIMARY KEY,
+    vendor_id INTEGER REFERENCES vendors(id) NOT NULL,
+    delivery_date DATE,
+    status VARCHAR(50) DEFAULT 'draft', -- draft, sent, received
+    items JSONB,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Insert default categories
 INSERT INTO categories (name, description, target_budget_percent) VALUES
     ('Grocery/Dry Goods', 'Krasdale, shelf-stable items, bulk grocery', 35.00),
@@ -245,7 +285,11 @@ INSERT INTO categories (name, description, target_budget_percent) VALUES
     ('Beverages', 'Sodas, juices, water, energy drinks', 10.00),
     ('Produce', 'Fresh fruits and vegetables', 15.00),
     ('Meat/Seafood', 'Fresh and packaged meats, seafood', 8.00),
-    ('Bakery', 'Bread, pastries, baked goods', 2.00);
+    ('Bakery', 'Bread, pastries, baked goods', 2.00),
+    ('Snacks/Chips', 'Chips, pretzels, crackers, snack foods', 5.00),
+    ('Candy/Chocolate', 'Candy bars, chocolate, sweets, gummies', 5.00),
+    ('Paper Goods', 'Paper towels, napkins, plates, cups', 3.00),
+    ('Cleaning', 'Cleaning supplies, trash bags, detergent', 2.00);
 
 -- Create indexes for common queries
 CREATE INDEX idx_invoices_vendor ON invoices(vendor_id);

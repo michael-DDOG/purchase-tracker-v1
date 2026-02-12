@@ -47,6 +47,8 @@ class Vendor(Base):
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    is_deli_vendor = Column(Boolean, default=False)
+
     category = relationship("Category", back_populates="vendors")
     invoices = relationship("Invoice", back_populates="vendor")
 
@@ -62,7 +64,8 @@ class Vendor(Base):
             'contact_person': self.contact_person,
             'payment_terms': self.payment_terms,
             'default_due_days': self.default_due_days,
-            'is_active': self.is_active
+            'is_active': self.is_active,
+            'is_deli_vendor': self.is_deli_vendor or False,
         }
 
 
@@ -390,3 +393,90 @@ class PriceContract(Base):
     __table_args__ = (
         Index('idx_contract_vendor_product', vendor_id, product_id),
     )
+
+
+# ==================== Deli Module ====================
+
+class DeliInventory(Base):
+    """Track deli product inventory with par levels."""
+    __tablename__ = 'deli_inventory'
+
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id'))
+    product_name = Column(String(500), nullable=False)
+    current_quantity = Column(Numeric(10, 2), default=0)
+    par_level = Column(Numeric(10, 2), default=0)
+    unit = Column(String(50), default='ea')
+    last_counted_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    product = relationship("Product")
+
+    def to_dict(self):
+        deficit = max(0, float(self.par_level or 0) - float(self.current_quantity or 0))
+        return {
+            'id': self.id,
+            'product_id': self.product_id,
+            'product_name': self.product_name,
+            'current_quantity': float(self.current_quantity) if self.current_quantity else 0,
+            'par_level': float(self.par_level) if self.par_level else 0,
+            'unit': self.unit,
+            'deficit': deficit,
+            'last_counted_at': self.last_counted_at.isoformat() if self.last_counted_at else None,
+        }
+
+
+class VendorDeliverySchedule(Base):
+    """Track vendor delivery days and cutoff times."""
+    __tablename__ = 'vendor_delivery_schedules'
+
+    id = Column(Integer, primary_key=True)
+    vendor_id = Column(Integer, ForeignKey('vendors.id'), nullable=False)
+    delivery_days = Column(String(100))  # comma-separated: "mon,wed,fri"
+    cutoff_time = Column(String(10))  # "14:00"
+    lead_days = Column(Integer, default=1)
+    notes = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    vendor = relationship("Vendor")
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'vendor_id': self.vendor_id,
+            'vendor_name': self.vendor.name if self.vendor else None,
+            'delivery_days': self.delivery_days,
+            'cutoff_time': self.cutoff_time,
+            'lead_days': self.lead_days,
+            'notes': self.notes,
+        }
+
+
+class DeliOrderSheet(Base):
+    """Generated order sheets for deli vendors."""
+    __tablename__ = 'deli_order_sheets'
+
+    id = Column(Integer, primary_key=True)
+    vendor_id = Column(Integer, ForeignKey('vendors.id'), nullable=False)
+    delivery_date = Column(Date)
+    status = Column(String(50), default='draft')  # draft, sent, received
+    items = Column(JSON)  # [{product_name, order_qty, unit, par_level, current_qty}]
+    notes = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    vendor = relationship("Vendor")
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'vendor_id': self.vendor_id,
+            'vendor_name': self.vendor.name if self.vendor else None,
+            'delivery_date': self.delivery_date.isoformat() if self.delivery_date else None,
+            'status': self.status,
+            'items': self.items or [],
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }

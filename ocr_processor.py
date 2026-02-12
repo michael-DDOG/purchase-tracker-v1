@@ -115,6 +115,64 @@ class InvoiceOCRProcessor:
         suffix = Path(filename).suffix.lower() if filename else '.jpg'
         return self._extract_with_claude(image_bytes, suffix)
 
+    def process_multiple_images(self, images: List[tuple]) -> ExtractedInvoice:
+        """
+        Process multiple invoice page images in a single Claude API call.
+        images: list of (image_bytes, suffix) tuples
+        """
+        if not images:
+            return ExtractedInvoice(confidence_score=0.0)
+        if len(images) == 1:
+            return self._extract_with_claude(images[0][0], images[0][1])
+        return self._extract_multi_with_claude(images)
+
+    def _extract_multi_with_claude(self, images: List[tuple]) -> ExtractedInvoice:
+        """
+        Send multiple images to Claude Vision API as pages of a single invoice.
+        """
+        if not self.api_key:
+            print("Warning: ANTHROPIC_API_KEY not set, OCR disabled")
+            return ExtractedInvoice(confidence_score=0.0)
+
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=self.api_key)
+
+            content_blocks = []
+            content_blocks.append({
+                "type": "text",
+                "text": f"These {len(images)} images are pages of a SINGLE invoice. Extract all data from all pages combined.",
+            })
+            for image_bytes, suffix in images:
+                image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                media_type = self._get_media_type(suffix)
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_b64,
+                    },
+                })
+            content_blocks.append({
+                "type": "text",
+                "text": VISION_PROMPT,
+            })
+
+            message = client.messages.create(
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=8192,
+                messages=[{"role": "user", "content": content_blocks}],
+            )
+
+            response_text = message.content[0].text
+            return self._parse_claude_response(response_text)
+
+        except Exception as e:
+            print(f"Claude Vision multi-page error: {e}")
+            return ExtractedInvoice(confidence_score=0.3, raw_text=str(e))
+
     def _get_media_type(self, suffix: str) -> str:
         media_types = {
             '.jpg': 'image/jpeg',

@@ -23,7 +23,8 @@ from models import (
     Base, Category, Vendor, Invoice, InvoiceItem,
     Product, DailySales, MonthlyBudget, PriceAlert,
     ProductVendorPrice, CompetitorStore, CompetitorPrice, Recommendation,
-    OCRCorrection, PriceContract
+    OCRCorrection, PriceContract,
+    DeliInventory, VendorDeliverySchedule, DeliOrderSheet,
 )
 from ocr_processor import InvoiceOCRProcessor, ExtractedInvoice
 from auth import verify_pin, create_token, verify_token
@@ -148,6 +149,7 @@ class InvoiceItemCreate(BaseModel):
     total_price: float
     unit: Optional[str] = None
     product_code: Optional[str] = None
+    category_override: Optional[int] = None
 
 class InvoiceCreate(BaseModel):
     vendor_id: int
@@ -284,6 +286,124 @@ def get_category(category_id: int, db: Session = Depends(get_db)):
         "target_budget_percent": float(category.target_budget_percent) if category.target_budget_percent else None,
         "current_month_spending": float(monthly_total)
     }
+
+
+@app.put("/api/categories/{category_id}")
+def update_category(category_id: int, data: CategoryCreate, db: Session = Depends(get_db)):
+    category = db.query(Category).filter(Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    category.name = data.name
+    if data.description is not None:
+        category.description = data.description
+    if data.target_budget_percent is not None:
+        category.target_budget_percent = data.target_budget_percent
+    db.commit()
+    db.refresh(category)
+    return {"id": category.id, "name": category.name, "description": category.description}
+
+
+@app.get("/api/categories/with-products")
+def categories_with_products(db: Session = Depends(get_db)):
+    """Categories with product counts and uncategorized count."""
+    cats = db.query(Category).all()
+    result = []
+    for cat in cats:
+        count = db.query(func.count(Product.id)).filter(Product.category_id == cat.id).scalar() or 0
+        result.append({
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "product_count": count,
+        })
+    uncategorized = db.query(func.count(Product.id)).filter(Product.category_id == None).scalar() or 0
+    return {"categories": result, "uncategorized_count": uncategorized}
+
+
+@app.get("/api/products/uncategorized")
+def uncategorized_products(limit: int = 50, db: Session = Depends(get_db)):
+    """Products without a category."""
+    products = db.query(Product).filter(Product.category_id == None).limit(limit).all()
+    return [
+        {"id": p.id, "name": p.name, "last_price": float(p.last_price) if p.last_price else None}
+        for p in products
+    ]
+
+
+@app.put("/api/products/{product_id}/category")
+def set_product_category(product_id: int, category_id: int, db: Session = Depends(get_db)):
+    """Manually assign a category to a product."""
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product.category_id = category_id
+    db.commit()
+    return {"message": "Category updated", "product_id": product_id, "category_id": category_id}
+
+
+class BulkCategorizeRequest(BaseModel):
+    assignments: List[dict]  # [{product_id: int, category_id: int}]
+
+@app.put("/api/products/bulk-categorize")
+def bulk_categorize_products(data: BulkCategorizeRequest, db: Session = Depends(get_db)):
+    """Batch assign categories to products."""
+    updated = 0
+    for entry in data.assignments:
+        product = db.query(Product).filter(Product.id == entry.get('product_id')).first()
+        if product:
+            product.category_id = entry.get('category_id')
+            updated += 1
+    db.commit()
+    return {"message": f"Updated {updated} products"}
+
+
+@app.post("/api/admin/seed-categories")
+def seed_additional_categories(db: Session = Depends(get_db)):
+    """Add missing default categories to existing databases."""
+    new_cats = [
+        ("Snacks/Chips", "Chips, pretzels, crackers, snack foods", 5.0),
+        ("Candy/Chocolate", "Candy bars, chocolate, sweets, gummies", 5.0),
+        ("Paper Goods", "Paper towels, napkins, plates, cups", 3.0),
+        ("Cleaning", "Cleaning supplies, trash bags, detergent", 2.0),
+    ]
+    added = 0
+    for name, desc, pct in new_cats:
+        existing = db.query(Category).filter(Category.name == name).first()
+        if not existing:
+            db.add(Category(name=name, description=desc, target_budget_percent=pct))
+            added += 1
+    db.commit()
+    return {"message": f"Added {added} new categories"}
+
+
+# ==================== AUTO-CATEGORIZATION ====================
+
+CATEGORY_KEYWORDS = {
+    "Snacks/Chips": ["doritos", "lays", "cheetos", "pringles", "fritos", "tostitos", "chip", "pretzel", "popcorn", "crackers", "goldfish", "cheez-it", "ruffles", "kettle", "pirate", "cape cod"],
+    "Candy/Chocolate": ["hershey", "snickers", "twix", "m&m", "reese", "kit kat", "milky way", "skittles", "starburst", "gummy", "haribo", "sour patch", "candy", "chocolate", "choco", "tootsie", "nerds", "airheads", "jolly rancher", "nutella", "bueno", "ferrero", "lindt"],
+    "Beverages": ["coca-cola", "pepsi", "sprite", "fanta", "gatorade", "snapple", "arizona", "poland spring", "dasani", "redbull", "monster", "juice", "soda", "water", "tea", "coffee", "drink", "lemonade", "tropicana"],
+    "Dairy": ["milk", "cheese", "yogurt", "butter", "cream", "egg", "dannon", "chobani", "yoplait", "horizon", "cabot", "sour cream", "cottage"],
+    "Produce": ["apple", "banana", "orange", "lettuce", "tomato", "onion", "potato", "carrot", "pepper", "celery", "grape", "melon", "berry", "avocado", "lemon", "lime", "cucumber"],
+    "Meat/Seafood": ["beef", "chicken", "pork", "turkey", "ham", "salami", "bacon", "sausage", "hot dog", "shrimp", "salmon", "tuna", "crab", "fish", "steak", "ground meat"],
+    "Bakery": ["bread", "roll", "bagel", "muffin", "croissant", "cake", "pie", "donut", "pastry", "baguette", "tortilla", "pita"],
+    "Frozen": ["frozen", "ice cream", "pizza frozen", "lean cuisine", "stouffer", "hot pocket", "eggo", "totino"],
+    "Grocery/Dry Goods": ["rice", "pasta", "cereal", "soup", "canned", "beans", "flour", "sugar", "oil", "sauce", "ketchup", "mustard", "mayo", "salt", "spice", "seasoning"],
+    "Deli/Specialty": ["deli", "hummus", "pesto", "olive", "balsamic", "specialty", "organic", "protein bar", "quest", "barebell", "kind bar", "cliff", "rxbar", "wellness"],
+    "Paper Goods": ["paper towel", "napkin", "toilet paper", "tissue", "plate", "cup", "straw", "plastic wrap", "foil", "trash bag"],
+    "Cleaning": ["cleaner", "windex", "lysol", "bleach", "detergent", "soap", "mop", "broom", "sponge", "sanitizer"],
+}
+
+
+def auto_categorize_product(product_name: str, db: Session) -> Optional[int]:
+    """Match product name to a category using keyword lookup."""
+    name_lower = product_name.lower()
+    for cat_name, keywords in CATEGORY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in name_lower:
+                category = db.query(Category).filter(Category.name == cat_name).first()
+                if category:
+                    return category.id
+    return None
 
 
 # ==================== VENDOR ENDPOINTS ====================
@@ -440,7 +560,8 @@ def create_invoice(invoice: InvoiceCreate, db: Session = Depends(get_db)):
             unit_price=item.unit_price,
             total_price=item.total_price,
             unit=item.unit,
-            product_code=item.product_code
+            product_code=item.product_code,
+            category_override=item.category_override,
         )
         db.add(db_item)
         db.flush()
@@ -538,6 +659,69 @@ async def process_invoice_image(
     } for item in result.line_items]
 
     # Apply learned OCR corrections
+    line_items = apply_ocr_corrections(db, line_items)
+
+    return OCRResultResponse(
+        vendor_name=result.vendor_name,
+        vendor_address=result.vendor_address,
+        vendor_phone=result.vendor_phone,
+        vendor_email=result.vendor_email,
+        invoice_number=result.invoice_number,
+        invoice_date=result.invoice_date,
+        total=result.total,
+        line_items=line_items,
+        confidence_score=result.confidence_score,
+        suggested_vendor_id=suggested_vendor_id
+    )
+
+
+@app.post("/api/ocr/process-multi", response_model=OCRResultResponse)
+async def process_multi_invoice_images(
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db)
+):
+    """Process multiple invoice page images in a single OCR call."""
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 pages allowed")
+
+    allowed_types = ['image/jpeg', 'image/png', 'image/jpg']
+    images = []
+    for f in files:
+        if f.content_type not in allowed_types:
+            raise HTTPException(status_code=400, detail=f"File type not allowed: {f.content_type}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_{f.filename}"
+        file_path = UPLOAD_DIR / filename
+        content = await f.read()
+        with open(file_path, "wb") as out:
+            out.write(content)
+        suffix = Path(f.filename).suffix.lower() if f.filename else '.jpg'
+        images.append((content, suffix))
+
+    try:
+        result = ocr_processor.process_multiple_images(images)
+    except Exception as e:
+        return OCRResultResponse(
+            vendor_name=None, vendor_address=None, vendor_phone=None,
+            vendor_email=None, invoice_number=None, invoice_date=None,
+            total=None, line_items=[], confidence_score=0.0, suggested_vendor_id=None
+        )
+
+    suggested_vendor_id = None
+    if result.vendor_name:
+        vendor = db.query(Vendor).filter(
+            Vendor.name.ilike(f"%{result.vendor_name}%")
+        ).first()
+        if vendor:
+            suggested_vendor_id = vendor.id
+
+    line_items = [{
+        'product_name': item.product_name,
+        'quantity': item.quantity,
+        'unit_price': item.unit_price,
+        'total_price': item.total_price
+    } for item in result.line_items]
+
     line_items = apply_ocr_corrections(db, line_items)
 
     return OCRResultResponse(
@@ -718,6 +902,10 @@ def analytics_products(
         Product.avg_price,
         Product.min_price,
         Product.max_price,
+        Product.sell_price,
+        Product.units_per_case,
+        Product.target_margin,
+        Product.category_id,
         func.sum(ProductVendorPrice.quantity).label('total_volume'),
         func.sum(ProductVendorPrice.unit_price * ProductVendorPrice.quantity).label('total_spend'),
         func.count(func.distinct(ProductVendorPrice.vendor_id)).label('vendor_count'),
@@ -740,6 +928,9 @@ def analytics_products(
 
     rows = query.limit(limit).all()
 
+    # Build category name lookup
+    cat_map = {c.id: c.name for c in db.query(Category).all()}
+
     return [
         {
             "id": r.id,
@@ -748,6 +939,11 @@ def analytics_products(
             "avg_price": float(r.avg_price) if r.avg_price else None,
             "min_price": float(r.min_price) if r.min_price else None,
             "max_price": float(r.max_price) if r.max_price else None,
+            "sell_price": float(r.sell_price) if r.sell_price else None,
+            "units_per_case": r.units_per_case,
+            "target_margin": float(r.target_margin) if r.target_margin else None,
+            "category_id": r.category_id,
+            "category_name": cat_map.get(r.category_id) if r.category_id else None,
             "total_volume": float(r.total_volume) if r.total_volume else 0,
             "total_spend": float(r.total_spend) if r.total_spend else 0,
             "vendor_count": r.vendor_count or 0,
@@ -1766,6 +1962,16 @@ def list_ocr_corrections(db: Session = Depends(get_db)):
         for c in corrections
     ]
 
+@app.delete("/api/ocr/corrections/{correction_id}")
+def delete_ocr_correction(correction_id: int, db: Session = Depends(get_db)):
+    correction = db.query(OCRCorrection).filter(OCRCorrection.id == correction_id).first()
+    if not correction:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    db.delete(correction)
+    db.commit()
+    return {"message": "Correction deleted"}
+
+
 def apply_ocr_corrections(db: Session, line_items: list) -> list:
     """Apply saved corrections to OCR output."""
     corrections = db.query(OCRCorrection).filter(
@@ -1967,9 +2173,17 @@ def _update_product_catalog(
         product.avg_price = sum(prices) / len(prices)
 
     else:
+        # Auto-categorize new product
+        cat_id = None
+        if hasattr(item, 'category_override') and item.category_override:
+            cat_id = item.category_override
+        else:
+            cat_id = auto_categorize_product(item.product_name, db)
+
         product = Product(
             name=item.product_name,
             normalized_name=normalized,
+            category_id=cat_id,
             last_vendor_id=vendor_id,
             last_price=item.unit_price,
             avg_price=item.unit_price,
@@ -2006,6 +2220,10 @@ def _update_product_catalog(
         )
         db.add(alert)
 
+    # If category_override provided, update existing product category too
+    if hasattr(item, 'category_override') and item.category_override and product.category_id is None:
+        product.category_id = item.category_override
+
     # Insert into product_vendor_prices
     pvp = ProductVendorPrice(
         product_id=product.id,
@@ -2017,6 +2235,148 @@ def _update_product_catalog(
         unit=item.unit,
     )
     db.add(pvp)
+
+
+# ==================== DELI MODULE ====================
+
+class DeliItemCreate(BaseModel):
+    product_name: str
+    product_id: Optional[int] = None
+    current_quantity: float = 0
+    par_level: float = 0
+    unit: str = 'ea'
+
+class DeliItemUpdate(BaseModel):
+    current_quantity: Optional[float] = None
+    par_level: Optional[float] = None
+
+class DeliveryScheduleCreate(BaseModel):
+    vendor_id: int
+    delivery_days: str  # "mon,wed,fri"
+    cutoff_time: Optional[str] = None
+    lead_days: int = 1
+    notes: Optional[str] = None
+
+@app.get("/api/deli/inventory")
+def list_deli_inventory(db: Session = Depends(get_db)):
+    """List deli inventory items with par level status."""
+    items = db.query(DeliInventory).order_by(DeliInventory.product_name).all()
+    return [item.to_dict() for item in items]
+
+@app.post("/api/deli/inventory")
+def add_deli_item(data: DeliItemCreate, db: Session = Depends(get_db)):
+    item = DeliInventory(
+        product_id=data.product_id,
+        product_name=data.product_name,
+        current_quantity=data.current_quantity,
+        par_level=data.par_level,
+        unit=data.unit,
+        last_counted_at=datetime.now(),
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item.to_dict()
+
+@app.put("/api/deli/inventory/{item_id}")
+def update_deli_item(item_id: int, data: DeliItemUpdate, db: Session = Depends(get_db)):
+    item = db.query(DeliInventory).filter(DeliInventory.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Deli item not found")
+    if data.current_quantity is not None:
+        item.current_quantity = data.current_quantity
+        item.last_counted_at = datetime.now()
+    if data.par_level is not None:
+        item.par_level = data.par_level
+    db.commit()
+    db.refresh(item)
+    return item.to_dict()
+
+@app.delete("/api/deli/inventory/{item_id}")
+def delete_deli_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(DeliInventory).filter(DeliInventory.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Deli item not found")
+    db.delete(item)
+    db.commit()
+    return {"message": "Item deleted"}
+
+@app.get("/api/deli/vendors")
+def list_deli_vendors(db: Session = Depends(get_db)):
+    """List vendors flagged as deli vendors."""
+    vendors = db.query(Vendor).filter(Vendor.is_deli_vendor == True, Vendor.is_active == True).all()
+    return [v.to_dict() for v in vendors]
+
+@app.put("/api/vendors/{vendor_id}/deli-flag")
+def toggle_deli_vendor(vendor_id: int, is_deli: bool = True, db: Session = Depends(get_db)):
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    vendor.is_deli_vendor = is_deli
+    db.commit()
+    return {"message": f"Vendor {'flagged' if is_deli else 'unflagged'} as deli vendor"}
+
+@app.get("/api/deli/order-sheet/{vendor_id}")
+def generate_order_sheet(vendor_id: int, db: Session = Depends(get_db)):
+    """Generate order sheet from par level deficits."""
+    vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    items = db.query(DeliInventory).all()
+    order_items = []
+    for item in items:
+        deficit = max(0, float(item.par_level or 0) - float(item.current_quantity or 0))
+        if deficit > 0:
+            order_items.append({
+                "product_name": item.product_name,
+                "order_qty": deficit,
+                "unit": item.unit,
+                "par_level": float(item.par_level or 0),
+                "current_qty": float(item.current_quantity or 0),
+            })
+
+    return {
+        "vendor_id": vendor_id,
+        "vendor_name": vendor.name,
+        "items": order_items,
+        "total_items": len(order_items),
+    }
+
+@app.get("/api/deli/delivery-schedule")
+def list_delivery_schedules(db: Session = Depends(get_db)):
+    """List delivery schedules for deli vendors."""
+    schedules = db.query(VendorDeliverySchedule).all()
+    return [s.to_dict() for s in schedules]
+
+@app.post("/api/deli/delivery-schedule")
+def create_delivery_schedule(data: DeliveryScheduleCreate, db: Session = Depends(get_db)):
+    schedule = VendorDeliverySchedule(
+        vendor_id=data.vendor_id,
+        delivery_days=data.delivery_days,
+        cutoff_time=data.cutoff_time,
+        lead_days=data.lead_days,
+        notes=data.notes,
+    )
+    db.add(schedule)
+    db.commit()
+    db.refresh(schedule)
+    return schedule.to_dict()
+
+@app.post("/api/admin/migrate")
+def run_migration(db: Session = Depends(get_db)):
+    """Add new columns to existing tables (for upgrades)."""
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        vendor_cols = [c['name'] for c in inspector.get_columns('vendors')]
+        if 'is_deli_vendor' not in vendor_cols:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE vendors ADD COLUMN is_deli_vendor BOOLEAN DEFAULT FALSE"))
+                conn.commit()
+        return {"message": "Migration complete"}
+    except Exception as e:
+        return {"message": f"Migration note: {e}"}
 
 
 # ==================== SEED DATA ====================
@@ -2035,6 +2395,10 @@ def seed_database(db: Session = Depends(get_db)):
         Category(name="Produce", description="Fresh fruits and vegetables", target_budget_percent=15),
         Category(name="Meat/Seafood", description="Fresh and packaged meats", target_budget_percent=8),
         Category(name="Bakery", description="Bread, pastries", target_budget_percent=2),
+        Category(name="Snacks/Chips", description="Chips, pretzels, crackers, snack foods", target_budget_percent=5),
+        Category(name="Candy/Chocolate", description="Candy bars, chocolate, sweets, gummies", target_budget_percent=5),
+        Category(name="Paper Goods", description="Paper towels, napkins, plates, cups", target_budget_percent=3),
+        Category(name="Cleaning", description="Cleaning supplies, trash bags, detergent", target_budget_percent=2),
     ]
 
     for cat in categories:
