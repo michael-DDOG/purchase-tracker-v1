@@ -1,5 +1,5 @@
 const { useState, useEffect, useCallback, useRef } = React;
-const { Camera, Upload, DollarSign, TrendingUp, Package, AlertTriangle, CheckCircle, Clock, X, Plus, Search, Filter, ChevronRight, RefreshCw, LogOut, BarChart3, ShoppingCart, Home, Users, Lightbulb, ExternalLink, ChevronDown, ArrowUpRight, ArrowDownRight, Moon, Sun, Download, FileText, AlertCircle, Truck, Eye, Star, RotateCcw, Archive, Percent, Shield, Calendar, Trash2, ClipboardList, Minus } = lucideReact;
+const { Camera, Upload, DollarSign, TrendingUp, Package, AlertTriangle, CheckCircle, Clock, X, Plus, Search, Filter, ChevronRight, RefreshCw, LogOut, BarChart3, ShoppingCart, Home, Users, Lightbulb, ExternalLink, ChevronDown, ArrowUpRight, ArrowDownRight, Moon, Sun, Download, FileText, AlertCircle, Truck, Eye, Star, RotateCcw, Archive, Percent, Shield, Calendar, Trash2 } = lucideReact;
 
 // API Configuration - relative path for production, respects proxy in dev
 const API_BASE = '/api';
@@ -2339,7 +2339,7 @@ const DeliTab = () => {
 
           {inventory.length === 0 && !showAddItem ? (
             <div className="bg-white rounded-xl p-8 text-center border border-gray-100">
-              <ClipboardList size={40} className="mx-auto text-gray-300 mb-3" />
+              <Package size={40} className="mx-auto text-gray-300 mb-3" />
               <div className="text-gray-500 font-medium">No deli items tracked yet</div>
               <div className="text-sm text-gray-400 mt-1">Add items to track inventory and par levels</div>
             </div>
@@ -2352,8 +2352,8 @@ const DeliTab = () => {
                     <div className="text-xs text-gray-500">Par: {item.par_level} {item.unit}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={() => updateCount(item.id, Math.max(0, item.current_quantity - 1))} className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
-                      <Minus size={14} />
+                    <button onClick={() => updateCount(item.id, Math.max(0, item.current_quantity - 1))} className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-600 font-bold">
+                      -
                     </button>
                     <span className={`text-lg font-bold ${item.deficit > 0 ? 'text-red-600' : 'text-green-600'}`}>
                       {item.current_quantity}
@@ -2712,7 +2712,7 @@ function PurchaseTracker() {
     { id: 'invoices', label: 'Invoices', icon: Package },
     { id: 'vendors', label: 'Vendors', icon: Users },
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-    { id: 'deli', label: 'Deli', icon: ClipboardList },
+    { id: 'deli', label: 'Deli', icon: ShoppingCart },
   ];
 
   return (
