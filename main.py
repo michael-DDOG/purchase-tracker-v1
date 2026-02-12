@@ -33,9 +33,41 @@ from auth import verify_pin, create_token, verify_token
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./purchase_tracker.db")
 UPLOAD_DIR = Path("./uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+BACKUP_DIR = Path("./backups")
+BACKUP_DIR.mkdir(exist_ok=True)
+
+# Auto-backup: copy DB before doing anything (protects against corruption)
+def _backup_database():
+    db_path = Path("./purchase_tracker.db")
+    if db_path.exists() and db_path.stat().st_size > 0:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = BACKUP_DIR / f"purchase_tracker_{timestamp}.db"
+        shutil.copy2(str(db_path), str(backup_path))
+        # Keep only last 10 backups
+        backups = sorted(BACKUP_DIR.glob("purchase_tracker_*.db"))
+        for old in backups[:-10]:
+            old.unlink()
+        print(f"Database backed up to {backup_path}")
+
+if "sqlite" in DATABASE_URL:
+    _backup_database()
 
 # Database setup
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+connect_args = {}
+if "sqlite" in DATABASE_URL:
+    connect_args["check_same_thread"] = False
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+
+# Enable WAL mode for SQLite (crash-resilient, survives power loss)
+if "sqlite" in DATABASE_URL:
+    from sqlalchemy import event
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create tables
@@ -2377,6 +2409,35 @@ def run_migration(db: Session = Depends(get_db)):
         return {"message": "Migration complete"}
     except Exception as e:
         return {"message": f"Migration note: {e}"}
+
+
+# ==================== DATABASE BACKUP ====================
+
+@app.post("/api/admin/backup")
+def manual_backup():
+    """Create a manual database backup."""
+    if "sqlite" not in DATABASE_URL:
+        return {"message": "Backup only available for SQLite"}
+    db_path = Path("./purchase_tracker.db")
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        raise HTTPException(status_code=400, detail="No database to back up")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = BACKUP_DIR / f"purchase_tracker_{timestamp}.db"
+    shutil.copy2(str(db_path), str(backup_path))
+    backups = sorted(BACKUP_DIR.glob("purchase_tracker_*.db"))
+    return {
+        "message": f"Backup created: {backup_path.name}",
+        "backup_count": len(backups),
+    }
+
+@app.get("/api/admin/backups")
+def list_backups():
+    """List available database backups."""
+    backups = sorted(BACKUP_DIR.glob("purchase_tracker_*.db"), reverse=True)
+    return [
+        {"name": b.name, "size": b.stat().st_size, "date": datetime.fromtimestamp(b.stat().st_mtime).isoformat()}
+        for b in backups
+    ]
 
 
 # ==================== SEED DATA ====================
