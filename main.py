@@ -297,6 +297,23 @@ def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
     db.refresh(db_category)
     return db_category
 
+@app.get("/api/categories/with-products")
+def categories_with_products(db: Session = Depends(get_db)):
+    """Categories with product counts and uncategorized count."""
+    cats = db.query(Category).all()
+    result = []
+    for cat in cats:
+        count = db.query(func.count(Product.id)).filter(Product.category_id == cat.id).scalar() or 0
+        result.append({
+            "id": cat.id,
+            "name": cat.name,
+            "description": cat.description,
+            "product_count": count,
+        })
+    uncategorized = db.query(func.count(Product.id)).filter(Product.category_id == None).scalar() or 0
+    return {"categories": result, "uncategorized_count": uncategorized}
+
+
 @app.get("/api/categories/{category_id}")
 def get_category(category_id: int, db: Session = Depends(get_db)):
     category = db.query(Category).filter(Category.id == category_id).first()
@@ -335,23 +352,6 @@ def update_category(category_id: int, data: CategoryCreate, db: Session = Depend
     return {"id": category.id, "name": category.name, "description": category.description}
 
 
-@app.get("/api/categories/with-products")
-def categories_with_products(db: Session = Depends(get_db)):
-    """Categories with product counts and uncategorized count."""
-    cats = db.query(Category).all()
-    result = []
-    for cat in cats:
-        count = db.query(func.count(Product.id)).filter(Product.category_id == cat.id).scalar() or 0
-        result.append({
-            "id": cat.id,
-            "name": cat.name,
-            "description": cat.description,
-            "product_count": count,
-        })
-    uncategorized = db.query(func.count(Product.id)).filter(Product.category_id == None).scalar() or 0
-    return {"categories": result, "uncategorized_count": uncategorized}
-
-
 @app.get("/api/products/uncategorized")
 def uncategorized_products(limit: int = 50, db: Session = Depends(get_db)):
     """Products without a category."""
@@ -360,17 +360,6 @@ def uncategorized_products(limit: int = 50, db: Session = Depends(get_db)):
         {"id": p.id, "name": p.name, "last_price": float(p.last_price) if p.last_price else None}
         for p in products
     ]
-
-
-@app.put("/api/products/{product_id}/category")
-def set_product_category(product_id: int, category_id: int, db: Session = Depends(get_db)):
-    """Manually assign a category to a product."""
-    product = db.query(Product).filter(Product.id == product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    product.category_id = category_id
-    db.commit()
-    return {"message": "Category updated", "product_id": product_id, "category_id": category_id}
 
 
 class BulkCategorizeRequest(BaseModel):
@@ -387,6 +376,17 @@ def bulk_categorize_products(data: BulkCategorizeRequest, db: Session = Depends(
             updated += 1
     db.commit()
     return {"message": f"Updated {updated} products"}
+
+
+@app.put("/api/products/{product_id}/category")
+def set_product_category(product_id: int, category_id: int, db: Session = Depends(get_db)):
+    """Manually assign a category to a product."""
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product.category_id = category_id
+    db.commit()
+    return {"message": "Category updated", "product_id": product_id, "category_id": category_id}
 
 
 @app.post("/api/admin/seed-categories")
@@ -2027,9 +2027,9 @@ def dead_stock(days_threshold: int = 45, db: Session = Depends(get_db)):
     older_cutoff = date.today() - timedelta(days=days_threshold * 3)
 
     # Products with purchases in the older period but NOT in the recent period
-    recent_products = db.query(func.distinct(ProductVendorPrice.product_id)).filter(
+    recent_products = db.query(ProductVendorPrice.product_id).filter(
         ProductVendorPrice.invoice_date >= cutoff,
-    ).subquery()
+    ).distinct().scalar_subquery()
 
     historical = db.query(
         Product.id,
